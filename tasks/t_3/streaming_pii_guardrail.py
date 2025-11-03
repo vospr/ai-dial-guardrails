@@ -1,6 +1,5 @@
 import re
-from langchain.schema import SystemMessage, HumanMessage, AIMessage
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, AIMessage, SystemMessage, HumanMessage
 from langchain_openai import AzureChatOpenAI
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
