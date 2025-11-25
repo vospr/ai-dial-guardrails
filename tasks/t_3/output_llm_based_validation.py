@@ -24,17 +24,82 @@ PROFILE = """
 **Annual Income:** $112,800  
 """
 
-VALIDATION_PROMPT = """NEED TO WRITE IT"""
+VALIDATION_PROMPT = """You are a security validation system that detects PII leaks in LLM responses.
 
-FILTER_SYSTEM_PROMPT = """NEED TO WRITE IT"""
+Analyze the LLM output for sensitive information disclosure:
+- SSN (Social Security Numbers)
+- Credit Card numbers
+- CVV codes
+- Expiration dates  
+- Driver's License numbers
+- Bank Account numbers
+- Full addresses
+- Dates of Birth
+- Annual Income
+
+Provide your assessment:
+
+{format_instructions}
+
+Remember: Name, phone, and email are ALLOWED. Everything else is a violation."""
+
+FILTER_SYSTEM_PROMPT = """You are a PII redaction system. Your task is to remove or replace sensitive information from text while preserving the conversational flow.
+
+Replace the following with generic placeholders:
+- SSN → [REDACTED-SSN]
+- Credit Card → [REDACTED-CREDIT-CARD]
+- CVV → [REDACTED]
+- Expiration Date → [REDACTED]
+- Driver's License → [REDACTED-LICENSE]
+- Bank Account → [REDACTED-ACCOUNT]
+- Address → [REDACTED-ADDRESS]
+- Date of Birth → [REDACTED-DATE]
+- Annual Income → [REDACTED-AMOUNT]
+
+Keep: Name, Phone, Email
+
+Return ONLY the redacted text, maintaining the original structure and tone."""
 
 #TODO 1:
 # Create AzureChatOpenAI client, model to use `gpt-4.1-nano-2025-04-14` (or any other mini or nano models)
 
-def validate(llm_output: str) :
+class OutputValidationResult(BaseModel):
+    contains_pii: bool = Field(description="True if PII detected, False if safe")
+    pii_types: list[str] = Field(default=[], description="List of PII types found")
+    reason: str = Field(description="Explanation of the decision")
+
+llm_client = AzureChatOpenAI(
+    temperature=0.0,
+    azure_deployment="gpt-4.1-nano-2025-04-14",
+    azure_endpoint=DIAL_URL,
+    api_key=SecretStr(API_KEY),
+    api_version=""
+)
+
+filter_client = AzureChatOpenAI(
+    temperature=0.0,
+    azure_deployment="gpt-4o",
+    azure_endpoint=DIAL_URL,
+    api_key=SecretStr(API_KEY),
+    api_version=""
+)
+
+def validate(llm_output: str) -> OutputValidationResult:
     #TODO 2:
     # Make validation of LLM output to check leaks of PII
-    raise NotImplementedError
+    parser = PydanticOutputParser(pydantic_object=OutputValidationResult)
+    
+    messages = [
+        SystemMessagePromptTemplate.from_template(VALIDATION_PROMPT),
+        HumanMessage(content=f"LLM output to validate:\n{llm_output}")
+    ]
+    
+    prompt = ChatPromptTemplate.from_messages(messages=messages).partial(
+        format_instructions=parser.get_format_instructions()
+    )
+    
+    result: OutputValidationResult = (prompt | llm_client | parser).invoke({"llm_output": llm_output})
+    return result
 
 def main(soft_response: bool):
     #TODO 3:
@@ -42,7 +107,64 @@ def main(soft_response: bool):
     # User input -> generation -> validation -> valid -> response to user
     #                                        -> invalid -> soft_response -> filter response with LLM -> response to user
     #                                                     !soft_response -> reject with description
-    raise NotImplementedError
+    
+    messages: list[BaseMessage] = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=PROFILE)
+    ]
+    
+    mode = "SOFT (Redaction)" if soft_response else "HARD (Blocking)"
+    print(f"🛡️  Secure Assistant with Output Validation [{mode}]")
+    print("=" * 80)
+    print("Type 'quit' or 'exit' to end the conversation")
+    print("=" * 80)
+    
+    while True:
+        user_input = input("\n👤 You: ").strip()
+        
+        if user_input.lower() in ['quit', 'exit']:
+            print("Goodbye!")
+            break
+        
+        if not user_input:
+            continue
+        
+        messages.append(HumanMessage(content=user_input))
+        
+        # Generate response
+        response = llm_client.invoke(messages)
+        llm_output = response.content
+        
+        # Validate output
+        print("🔍 Validating output...")
+        validation_result = validate(llm_output)
+        
+        if validation_result.contains_pii:
+            print(f"⚠️  PII DETECTED: {', '.join(validation_result.pii_types)}")
+            
+            if soft_response:
+                # Filter PII from response
+                print("🔧 Applying redaction...")
+                filter_messages = [
+                    SystemMessage(content=FILTER_SYSTEM_PROMPT),
+                    HumanMessage(content=llm_output)
+                ]
+                filtered_response = filter_client.invoke(filter_messages)
+                final_output = filtered_response.content
+                
+                # Update history with filtered response
+                messages.append(AIMessage(content=final_output))
+                print(f"\n🤖 Assistant (redacted): {final_output}\n")
+            else:
+                # Hard block
+                rejection_msg = f"Response blocked due to PII disclosure: {validation_result.reason}"
+                messages.append(AIMessage(content="[User attempted to access confidential information]"))
+                print(f"\n❌ BLOCKED: {rejection_msg}\n")
+        else:
+            # Output is safe
+            print("✅ Output validated - No PII detected")
+            messages.append(response)
+            print(f"\n🤖 Assistant: {llm_output}\n")
 
 
 main(soft_response=False)
